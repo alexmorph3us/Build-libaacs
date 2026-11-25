@@ -44,13 +44,56 @@ jobs:
 
       - name: Install Android NDK and build tools
         run: |
+          set -euo pipefail
           ANDROID_SDK_ROOT="$RUNNER_TEMP/android-sdk"
           mkdir -p "$ANDROID_SDK_ROOT"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+
+          # Accept SDK licenses non-interactively.
+          yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses >/dev/null 2>&1 || true
+
           sdkmanager --sdk_root="$ANDROID_SDK_ROOT" \
             "platforms;android-35" "build-tools;35.0.0" "ndk;${NDK_VERSION}"
-          echo "ANDROID_SDK=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK=$ANDROID_SDK_ROOT"        >> "$GITHUB_ENV"
+
+          # Discover where the NDK actually landed. Try the canonical
+          # location first, then fall back to any ndk/* dir, then to the
+          # legacy ndk-bundle.
+          NDK_DIR=""
+          for candidate in \
+              "$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" \
+              "$ANDROID_SDK_ROOT/ndk-bundle" \
+              "$ANDROID_HOME/ndk/${NDK_VERSION}" \
+              "$ANDROID_HOME/ndk-bundle"; do
+            if [ -d "$candidate/toolchains/llvm/prebuilt/linux-x86_64/sysroot" ]; then
+              NDK_DIR="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$NDK_DIR" ]; then
+            # Last resort: any ndk/<something> that has a sysroot.
+            NDK_DIR="$(find "$ANDROID_SDK_ROOT" "${ANDROID_HOME:-/nonexistent}" -maxdepth 3 \
+                        -type d -path '*/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/sysroot' \
+                        -print -quit 2>/dev/null | sed 's#/toolchains/llvm/prebuilt/linux-x86_64/sysroot##')" || true
+          fi
+
+          if [ -z "$NDK_DIR" ] || [ ! -d "$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/sysroot" ]; then
+            echo "FATAL: could not locate NDK after sdkmanager install."
+            echo "--- ANDROID_SDK_ROOT listing ---"
+            ls -la "$ANDROID_SDK_ROOT"            || true
+            echo "--- ndk dir listing ---"
+            ls -la "$ANDROID_SDK_ROOT/ndk"       || true
+            echo "--- ANDROID_HOME listing ---"
+            ls -la "${ANDROID_HOME:-/nonexistent}" || true
+            echo "--- sdkmanager --list_installed ---"
+            sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --list_installed || true
+            exit 1
+          fi
+
+          echo "Resolved ANDROID_NDK=$NDK_DIR"
+          echo "ANDROID_NDK=$NDK_DIR" >> "$GITHUB_ENV"
 
       - name: Download pinned GNU crypto dependencies
         run: |
@@ -68,20 +111,27 @@ jobs:
         run: |
           set -euo pipefail
           SRC="$GITHUB_WORKSPACE"
-          NDK="$ANDROID_NDK"
+          NDK="${ANDROID_NDK:?ANDROID_NDK is not set — did the NDK install step run?}"
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
           SOURCES="$RUNNER_TEMP/sources"
           WORK="$RUNNER_TEMP/cross-build"
           mkdir -p "$WORK"
 
           # Sanity: the NDK layout must be what we think it is.
-          test -d "$TOOLCHAIN/sysroot" || { echo "FATAL: NDK sysroot missing at $TOOLCHAIN/sysroot"; exit 1; }
-          test -x "$TOOLCHAIN/bin/llvm-ar" || { echo "FATAL: llvm-ar missing"; exit 1; }
-
-          # Do NOT put the NDK tools on PATH ahead of the system tools. We use
-          # absolute paths instead. This prevents a host `clang`/`ld`/`strip`
-          # from being picked up by configure's probes.
-          # export PATH="$TOOLCHAIN/bin:$PATH"
+          echo "Using NDK at: $NDK"
+          test -d "$TOOLCHAIN/sysroot" || {
+            echo "FATAL: NDK sysroot missing at $TOOLCHAIN/sysroot"
+            echo "--- NDK listing ---"
+            ls -la "$NDK" 2>/dev/null || true
+            echo "--- toolchains listing ---"
+            ls -la "$NDK/toolchains" 2>/dev/null || true
+            exit 1
+          }
+          test -x "$TOOLCHAIN/bin/llvm-ar" || {
+            echo "FATAL: llvm-ar missing under $TOOLCHAIN/bin"
+            ls -la "$TOOLCHAIN/bin" 2>/dev/null | head -n 60 || true
+            exit 1
+          }
 
           dump_log_head() {
             local logfile="$1"
