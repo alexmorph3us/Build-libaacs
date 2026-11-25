@@ -92,8 +92,12 @@ jobs:
             tar -xf "$SOURCES/libgpg-error-${LIBGPG_ERROR_VERSION}.tar.bz2" \
               -C "$WORK/gpg-error-$abi" --strip-components=1
             pushd "$WORK/gpg-error-$abi"
-            ./configure --host="$host" --prefix="$prefix" \
-              --enable-static --disable-shared --disable-nls
+            if ! ./configure --host="$host" --prefix="$prefix" \
+            --enable-static --disable-shared --disable-nls; then
+            echo "===== libgpg-error config.log ====="
+            tail -n 150 config.log
+            exit 1
+            fi
             make -j2
             make install
             popd
