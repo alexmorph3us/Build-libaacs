@@ -1,82 +1,120 @@
-# Libaacs
+# libaacs provider APK
 
-**libaacs** is a research project for a cross-platform open-source implementation of the AACS specification.
+An Android package whose only content is `libaacs.so.0`, one copy per ABI.
+It installs no code, no activity and no service: an application that has
+this package installed opens the library straight out of it, by handing the
+dynamic linker a path into the APK.
+
+    /data/app/~~.../org.libaacs.provider-.../base.apk!/lib/arm64-v8a/libaacs.so.0
+
+The package name is `org.libaacs.provider`, declared in `AndroidManifest.xml`.
 
 
-## Goals and features
+## Contents
 
-This research project provides, through an open-source library, a way to understand how the AACS works.
+    AndroidManifest.xml     the package: name, version, and nothing else
+    build-apk-android.sh    packages prebuilt libraries into a signed APK
+    README.md               this file
 
-This research project is mainly developed by an international team of developers from **Doom9**.
+The manifest declares no component and no permission.
 
-Currently supported platforms are GNU/Linux, Windows, MacOS X. The main dependency is libgcrypt for all cryptographic functions.
 
-# Disclaimer
+## Requirements
 
-This library is written for the purpose of playing Blu-ray movies.
+To build the libraries:
 
-It is intended for software that want to support Blu-ray playback (such as VLC and
-MPlayer). We, the authors of this library, do not condone nor endorse piracy.
+* the Android NDK
+* the usual autotools chain — autoconf, automake, libtool, pkg-config —
+  plus bison and flex
+* a libgcrypt and a libgpg-error built for each ABI (see below)
 
-This library is simply a tool for playback of Blu-ray movies. Like any tool, the
-use of this tool can also be abused. There are already numerous laws in
-different countries and juridictions all over the world that protect copyrighted
-material, such as Blu-ray movies.
+To build the APK:
 
-With that said, it would have been impossible for us to distribute this library
-with terms such as "you cannot use this library for piracy", because this would
-violate the Open Source Definition and the LGPL license.
-Instead, we present to everyone this disclaimer.
+* the Android SDK: **build-tools 35 or later**
+* `zip`
+* a keystore
 
-As a reminder, here is also the disclaimer found at the beginning of any movie
-in relation to copyrights.
 
-## ATTENTION
+## Building the libraries
 
-International agreement and national laws protect copyrighted motion pictures,
-videotapes, and sound recordings.
+libaacs is configured and built once per ABI, out of tree. libgcrypt and
+libgpg-error have to exist for the target already — the NDK sysroot has
+neither, and Android ships neither — as static archives, so that they end
+up absorbed into `libaacs.so.0` and nothing extra has to be packaged.
 
-UNAUTHORIZED REPRODUCTION, EXHIBITION OR DISTRIBUTION OF COPYRIGHTED MOTION
-PICTURES CAN RESULT IN SEVERE CRIMINAL AND CIVIL PENALTIES UNDER THE LAWS OF
-YOUR COUNTRY.
+VLC's contribs are one place they exist for exactly these ABIs. Any prefix
+holding a target build of the two works the same way; only the value of
+`CONTRIB` below changes.
 
-The International Criminal Police Organization - INTERPOL, has expressed its
-concern about motion picture and sound recording piracy to all of its member
-national police forces. (Resolution adopted at INTERPOL General Assembly,
-Stockholm, Sweden, September 8, 1977.)
+For **arm64-v8a**:
 
-# Contribute
+    export ANDROID_NDK=/path/to/android-ndk
+    export LIBAACS=/path/to/libaacs
+    VLC_SRC=/path/to/vlc                        # the tree whose contribs are built
 
-To contribute, just compile the library and open merge requests on the repository:
-https://code.videolan.org/videolan/libaacs
+    TOOLCHAIN=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64   # darwin-x86_64 on macOS
+    CONTRIB=$VLC_SRC/contrib/aarch64-linux-android
 
-## CoC
+    cd "$LIBAACS"
+    ./bootstrap                     # git checkout only
+    rm -rf build-arm64-v8a && mkdir build-arm64-v8a && cd build-arm64-v8a
 
-The [VideoLAN Code of Conduct](https://wiki.videolan.org/CoC) applies to this project.
+    export PATH=$TOOLCHAIN/bin:$PATH
+    export CC=aarch64-linux-android21-clang
+    export AR=llvm-ar RANLIB=llvm-ranlib NM=llvm-nm STRIP=llvm-strip
+    export PKG_CONFIG_LIBDIR=$CONTRIB/lib/pkgconfig
+    export PKG_CONFIG_PATH= PKG_CONFIG_SYSROOT_DIR=
+    export PKG_CONFIG="pkg-config --static"
 
-## Mailing list
+    ../configure --host=aarch64-linux-android --prefix=/ \
+                 --disable-static --enable-shared \
+                 --with-libgcrypt-prefix="$CONTRIB" \
+                 CFLAGS="-O2 -fPIC" \
+                 LDFLAGS="-L$CONTRIB/lib -Wl,--exclude-libs,ALL"
 
-You can discuss about libaacs on the [libaacs-devel mailing list](https://mailman.videolan.org/listinfo/libaacs-devel)
+    make -j"$(nproc)"
 
-## CLA
+and the same for the other ABIs, with three names changed:
 
-There is no CLA.
+| ABI | CC prefix | `--host` | contrib directory |
+| --- | --- | --- | --- |
+| `arm64-v8a` | `aarch64-linux-android` | `aarch64-linux-android` | `aarch64-linux-android` |
+| `armeabi-v7a` | `armv7a-linux-androideabi` | `arm-linux-androideabi` | `arm-linux-androideabi` |
+| `x86_64` | `x86_64-linux-android` | `x86_64-linux-android` | `x86_64-linux-android` |
+| `x86` | `i686-linux-android` | `i686-linux-android` | `i686-linux-android` |
 
-People will keep their copyright and their authorship rights, while adhering to the license.
+## Building the APK
 
-VideoLAN will only have the collective work rights.
+    export ANDROID_SDK=/path/to/android-sdk
+    export LIBAACS=/path/to/libaacs
+    ./build-apk-android.sh
 
-# FAQ
+`ANDROID_HOME` is accepted in place of `ANDROID_SDK`.
 
-## Do you give the keys?
+It reads each ABI from `$LIBAACS/build-<abi>/.libs`, where a plain `make`
+leaves the library, and packages what it finds, stripping it on the way in.
+The result is `out/libaacs-provider.apk`.
 
-We do not ship any encryption keys or cert, no.
+| Variable | Default | |
+| --- | --- | --- |
+| `ANDROID_SDK` | `$ANDROID_HOME` | required |
+| `LIBAACS` | — | required; holds the `build-<abi>` directories |
+| `OUT` | `out/` | where the APK is written |
+| `MANIFEST` | `AndroidManifest.xml` | |
+| `MIN_SDK` | 23 | |
+| `TARGET_SDK` | 35 | |
+| `VERSION_CODE` | 1 | must increase with every published build |
+| `VERSION_NAME` | 0.11.1 | the libaacs version packaged; bump with it |
+| `KEYSTORE` | `~/.android/debug.keystore` | see below |
+| `KEY_ALIAS` | `androiddebugkey` | |
+| `KEYSTORE_PASS` | `android` | |
+| `KEY_PASS` | `$KEYSTORE_PASS` | |
+| `BUILD_TOOLS` | latest installed | 35 or later |
+| `ANDROID_JAR` | latest installed platform | |
+| `STRIP` | `llvm-strip` if on `PATH` | skipped if neither is found |
+| `READELF` | `readelf` | the NDK's `llvm-readelf` also works |
 
-## Do you provide binaries?
-
-No, we don't. You should compile this yourself.
-
-## Do you implement HD-DVD AACS version?
-
-We do not, but patches are very welcome.
-
+Every check the script makes is there because the failure it catches is
+silent: a misaligned or compressed entry produces an APK that builds,
+installs, and looks exactly right until an application tries to open the
+library.
