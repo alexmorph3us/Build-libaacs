@@ -141,21 +141,20 @@ jobs:
           # that would normally measure the pthread lock size; it falls back to
           # src/syscfg/lock-obj-pub.linux-android.h, which upstream does not
           # ship, so we supply it from the closest matching pre-generated file.
-          lock_obj_for_abi() {
+                    lock_obj_for_abi() {
             local abi="$1"
             case "$abi" in
               arm64-v8a)
-                echo "lock-obj-pub.aarch64-unknown-linux-android.h"
+                echo "lock-obj-pub.aarch64-unknown-linux-androideabi.h"
                 ;;
               armeabi-v7a)
                 echo "lock-obj-pub.arm-unknown-linux-androideabi.h"
                 ;;
               x86)
-                echo "lock-obj-pub.arm-unknown-linux-androideabi.h"
+                echo "lock-obj-pub.i686-unknown-linux-androideabi.h"
                 ;;
               x86_64)
-                # Termux uses the aarch64 header here as a temporary workaround.
-                echo "lock-obj-pub.aarch64-unknown-linux-android.h"
+                echo "lock-obj-pub.x86_64-unknown-linux-androideabi.h"
                 ;;
               *)
                 echo ""
