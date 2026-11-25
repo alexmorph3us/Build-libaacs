@@ -73,19 +73,65 @@ jobs:
           SOURCES="$RUNNER_TEMP/sources"
           WORK="$RUNNER_TEMP/cross-build"
           mkdir -p "$WORK"
-          export PATH="$TOOLCHAIN/bin:$PATH"
+
+          # Sanity: the NDK layout must be what we think it is.
+          test -d "$TOOLCHAIN/sysroot" || { echo "FATAL: NDK sysroot missing at $TOOLCHAIN/sysroot"; exit 1; }
+          test -x "$TOOLCHAIN/bin/llvm-ar" || { echo "FATAL: llvm-ar missing"; exit 1; }
+
+          # Do NOT put the NDK tools on PATH ahead of the system tools. We use
+          # absolute paths instead. This prevents a host `clang`/`ld`/`strip`
+          # from being picked up by configure's probes.
+          # export PATH="$TOOLCHAIN/bin:$PATH"
+
+          dump_log_head() {
+            local logfile="$1"
+            echo "===== ${logfile##*/} (first 400 lines) ====="
+            sed -n '1,400p' "$logfile" || true
+          }
 
           build_abi() {
             local abi="$1" triple="$2" host="$3"
             local prefix="$WORK/prefix-$abi"
             local build="$WORK/build-$abi"
+            local sysroot="$TOOLCHAIN/sysroot"
             mkdir -p "$prefix" "$build"
-            export CC="${triple}${MIN_API}-clang"
-            export AR=llvm-ar RANLIB=llvm-ranlib NM=llvm-nm STRIP=llvm-strip
+
+            # --- Reset host build environment completely for this ABI ---
+            unset LIBRARY_PATH CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH
+            unset LDFLAGS CFLAGS CPPFLAGS CXXFLAGS CC CXX AR RANLIB NM STRIP LD
+            unset PKG_CONFIG_PATH PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+            unset CC_FOR_BUILD CFLAGS_FOR_BUILD
+
+            export CC="$TOOLCHAIN/bin/${triple}${MIN_API}-clang"
+            export CXX="$TOOLCHAIN/bin/${triple}${MIN_API}-clang++"
+            export LD="$TOOLCHAIN/bin/ld.lld"
+            export AR="$TOOLCHAIN/bin/llvm-ar"
+            export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
+            export NM="$TOOLCHAIN/bin/llvm-nm"
+            export STRIP="$TOOLCHAIN/bin/llvm-strip"
+
+            for tool in "$CC" "$CXX" "$LD" "$AR" "$RANLIB" "$NM" "$STRIP"; do
+              test -x "$tool" || { echo "FATAL: missing tool $tool"; exit 1; }
+            done
+
+            # Explicit sysroot everywhere. This is the fix for "C compiler
+            # cannot create executables" when the wrapper cannot locate its
+            # own sysroot.
+            export CFLAGS="--sysroot=$sysroot -O2 -fPIC -I$prefix/include"
+            export CXXFLAGS="$CFLAGS"
+            export CPPFLAGS="--sysroot=$sysroot -I$prefix/include"
+            export LDFLAGS="--sysroot=$sysroot -L$prefix/lib"
+
             export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig"
             export PKG_CONFIG_PATH=
             export PKG_CONFIG_SYSROOT_DIR=
+            export PKG_CONFIG="pkg-config"
 
+            echo "=========================================================="
+            echo "===== ABI $abi (host=$host, CC=$CC) ====="
+            echo "=========================================================="
+
+            # ---------- libgpg-error ----------
             echo "===== Building libgpg-error for $abi ====="
             rm -rf "$WORK/gpg-error-$abi"
             mkdir "$WORK/gpg-error-$abi"
@@ -93,42 +139,71 @@ jobs:
               -C "$WORK/gpg-error-$abi" --strip-components=1
             pushd "$WORK/gpg-error-$abi"
             if ! ./configure --host="$host" --prefix="$prefix" \
-            --enable-static --disable-shared --disable-nls; then
-            echo "===== libgpg-error config.log ====="
-            tail -n 150 config.log
-            exit 1
+                 --enable-static --disable-shared --disable-nls \
+                 > configure.out 2>&1; then
+              echo "----- libgpg-error configure failed -----"
+              tail -n 60 configure.out || true
+              if [ -f config.log ]; then dump_log_head config.log; fi
+              exit 1
             fi
-            make -j2
+            if ! make -j2 > make.out 2>&1; then
+              echo "----- libgpg-error make failed -----"
+              tail -n 100 make.out || true
+              exit 1
+            fi
             make install
             popd
 
+            # ---------- libgcrypt ----------
             echo "===== Building libgcrypt for $abi ====="
             rm -rf "$WORK/libgcrypt-$abi"
             mkdir "$WORK/libgcrypt-$abi"
             tar -xf "$SOURCES/libgcrypt-${LIBGCRYPT_VERSION}.tar.bz2" \
               -C "$WORK/libgcrypt-$abi" --strip-components=1
             pushd "$WORK/libgcrypt-$abi"
-            ./configure --host="$host" --prefix="$prefix" \
-              --with-gpg-error-prefix="$prefix" \
-              --enable-static --disable-shared --disable-asm \
-              --disable-doc --disable-nls
-            make -j2
+            if ! ./configure --host="$host" --prefix="$prefix" \
+                 --with-gpg-error-prefix="$prefix" \
+                 --enable-static --disable-shared --disable-asm \
+                 --disable-doc --disable-nls \
+                 > configure.out 2>&1; then
+              echo "----- libgcrypt configure failed -----"
+              tail -n 60 configure.out || true
+              if [ -f config.log ]; then dump_log_head config.log; fi
+              exit 1
+            fi
+            if ! make -j2 > make.out 2>&1; then
+              echo "----- libgcrypt make failed -----"
+              tail -n 100 make.out || true
+              exit 1
+            fi
             make install
             popd
 
+            # ---------- libaacs ----------
             echo "===== Building libaacs for $abi ====="
             rm -rf "$SRC/build-$abi"
             mkdir "$SRC/build-$abi"
             pushd "$SRC/build-$abi"
             export PKG_CONFIG="pkg-config --static"
-            export CFLAGS="-O2 -fPIC"
-            export LDFLAGS="-L$prefix/lib -Wl,--exclude-libs,ALL"
-            "$SRC/configure" --host="$host" --prefix=/ \
-              --disable-static --enable-shared \
-              --with-libgcrypt-prefix="$prefix"
-            make -j2
+            export CFLAGS="--sysroot=$sysroot -O2 -fPIC -I$prefix/include"
+            export LDFLAGS="--sysroot=$sysroot -L$prefix/lib -Wl,--exclude-libs,ALL"
+            if ! "$SRC/configure" --host="$host" --prefix=/ \
+                 --disable-static --enable-shared \
+                 --with-libgcrypt-prefix="$prefix" \
+                 > configure.out 2>&1; then
+              echo "----- libaacs configure failed -----"
+              tail -n 60 configure.out || true
+              if [ -f config.log ]; then dump_log_head config.log; fi
+              exit 1
+            fi
+            if ! make -j2 > make.out 2>&1; then
+              echo "----- libaacs make failed -----"
+              tail -n 100 make.out || true
+              exit 1
+            fi
             popd
-            test -n "$(find "$SRC/build-$abi/.libs" -maxdepth 1 -type f -name 'libaacs.so*' -print -quit)"
+            test -n "$(find "$SRC/build-$abi/.libs" -maxdepth 1 -type f -name 'libaacs.so*' -print -quit)" \
+              || { echo "FATAL: libaacs.so not produced for $abi"; exit 1; }
           }
 
           bash "$SRC/bootstrap"
