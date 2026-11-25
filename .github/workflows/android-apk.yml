@@ -57,9 +57,7 @@ jobs:
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_SDK=$ANDROID_SDK_ROOT"        >> "$GITHUB_ENV"
 
-          # Discover where the NDK actually landed. Try the canonical
-          # location first, then fall back to any ndk/* dir, then to the
-          # legacy ndk-bundle.
+          # Discover where the NDK actually landed.
           NDK_DIR=""
           for candidate in \
               "$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" \
@@ -73,7 +71,6 @@ jobs:
           done
 
           if [ -z "$NDK_DIR" ]; then
-            # Last resort: any ndk/<something> that has a sysroot.
             NDK_DIR="$(find "$ANDROID_SDK_ROOT" "${ANDROID_HOME:-/nonexistent}" -maxdepth 3 \
                         -type d -path '*/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/sysroot' \
                         -print -quit 2>/dev/null | sed 's#/toolchains/llvm/prebuilt/linux-x86_64/sysroot##')" || true
@@ -139,6 +136,33 @@ jobs:
             sed -n '1,400p' "$logfile" || true
           }
 
+          # Map ABI -> pre-generated lock-obj header shipped by libgpg-error.
+          # Android is a cross build, so configure cannot run the probe program
+          # that would normally measure the pthread lock size; it falls back to
+          # src/syscfg/lock-obj-pub.linux-android.h, which upstream does not
+          # ship, so we supply it from the closest matching pre-generated file.
+          lock_obj_for_abi() {
+            local abi="$1"
+            case "$abi" in
+              arm64-v8a)
+                echo "lock-obj-pub.aarch64-unknown-linux-android.h"
+                ;;
+              armeabi-v7a)
+                echo "lock-obj-pub.arm-unknown-linux-androideabi.h"
+                ;;
+              x86)
+                echo "lock-obj-pub.arm-unknown-linux-androideabi.h"
+                ;;
+              x86_64)
+                # Termux uses the aarch64 header here as a temporary workaround.
+                echo "lock-obj-pub.aarch64-unknown-linux-android.h"
+                ;;
+              *)
+                echo ""
+                ;;
+            esac
+          }
+
           build_abi() {
             local abi="$1" triple="$2" host="$3"
             local prefix="$WORK/prefix-$abi"
@@ -164,9 +188,6 @@ jobs:
               test -x "$tool" || { echo "FATAL: missing tool $tool"; exit 1; }
             done
 
-            # Explicit sysroot everywhere. This is the fix for "C compiler
-            # cannot create executables" when the wrapper cannot locate its
-            # own sysroot.
             export CFLAGS="--sysroot=$sysroot -O2 -fPIC -I$prefix/include"
             export CXXFLAGS="$CFLAGS"
             export CPPFLAGS="--sysroot=$sysroot -I$prefix/include"
@@ -188,17 +209,38 @@ jobs:
             tar -xf "$SOURCES/libgpg-error-${LIBGPG_ERROR_VERSION}.tar.bz2" \
               -C "$WORK/gpg-error-$abi" --strip-components=1
             pushd "$WORK/gpg-error-$abi"
+
+            # --- FIX: supply the missing Android lock-obj header ---
+            local lock_hdr
+            lock_hdr="$(lock_obj_for_abi "$abi")"
+            if [ -z "$lock_hdr" ]; then
+              echo "FATAL: no lock-obj mapping for ABI $abi"
+              popd
+              exit 1
+            fi
+            if [ ! -f "src/syscfg/$lock_hdr" ]; then
+              echo "FATAL: expected lock-obj source header not found: src/syscfg/$lock_hdr"
+              ls -la src/syscfg/ || true
+              popd
+              exit 1
+            fi
+            cp "src/syscfg/$lock_hdr" src/syscfg/lock-obj-pub.linux-android.h
+            echo "Installed lock-obj header: src/syscfg/$lock_hdr -> lock-obj-pub.linux-android.h"
+            # --- end fix ---
+
             if ! ./configure --host="$host" --prefix="$prefix" \
                  --enable-static --disable-shared --disable-nls \
                  > configure.out 2>&1; then
               echo "----- libgpg-error configure failed -----"
               tail -n 60 configure.out || true
               if [ -f config.log ]; then dump_log_head config.log; fi
+              popd
               exit 1
             fi
             if ! make -j2 > make.out 2>&1; then
               echo "----- libgpg-error make failed -----"
               tail -n 100 make.out || true
+              popd
               exit 1
             fi
             make install
@@ -219,11 +261,13 @@ jobs:
               echo "----- libgcrypt configure failed -----"
               tail -n 60 configure.out || true
               if [ -f config.log ]; then dump_log_head config.log; fi
+              popd
               exit 1
             fi
             if ! make -j2 > make.out 2>&1; then
               echo "----- libgcrypt make failed -----"
               tail -n 100 make.out || true
+              popd
               exit 1
             fi
             make install
@@ -244,11 +288,13 @@ jobs:
               echo "----- libaacs configure failed -----"
               tail -n 60 configure.out || true
               if [ -f config.log ]; then dump_log_head config.log; fi
+              popd
               exit 1
             fi
             if ! make -j2 > make.out 2>&1; then
               echo "----- libaacs make failed -----"
               tail -n 100 make.out || true
+              popd
               exit 1
             fi
             popd
