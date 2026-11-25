@@ -19,7 +19,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      ANDROID_SDK_ROOT: ${{ runner.temp }}/android-sdk
       NDK_VERSION: 27.2.12479018
       MIN_API: 23
       LIBGPG_ERROR_VERSION: 1.61
@@ -45,7 +44,9 @@ jobs:
 
       - name: Install Android NDK and build tools
         run: |
+          ANDROID_SDK_ROOT="$RUNNER_TEMP/android-sdk"
           mkdir -p "$ANDROID_SDK_ROOT"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
           sdkmanager --sdk_root="$ANDROID_SDK_ROOT" \
             "platforms;android-35" "build-tools;35.0.0" "ndk;${NDK_VERSION}"
           echo "ANDROID_SDK=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
