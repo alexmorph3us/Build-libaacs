@@ -1,0 +1,93 @@
+# Save as .github/workflows/build-libaacs-provider.yml in any GitHub repo.
+# The libaacs source is cloned from code.videolan.org by the workflow itself,
+# so nothing else needs to be in the repo. Run from the Actions tab.
+# NOT TESTED beyond the setup/bootstrap stage; written from the branch's
+# package/android/README.md and build-apk-android.sh.
+name: build-libaacs-provider
+on: workflow_dispatch
+
+env:
+  GPG_ERROR_VER: "1.61"   # versions taken from the branch's .gitlab-ci.yml
+  GCRYPT_VER: "1.12.2"
+  API: "21"
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: libaacs-src
+    steps:
+      - name: Clone the libaacs provider branch
+        working-directory: .
+        run: |
+          set -eux
+          git clone --depth 1 -b org-libaacs-provider https://code.videolan.org/Pierrebog/libaacs.git libaacs-src
+          ls libaacs-src libaacs-src/src libaacs-src/src/libaacs
+          test -f libaacs-src/src/libaacs.pc.in
+          test -f libaacs-src/src/libaacs/aacs-version.h.in
+
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool pkg-config bison flex zip libgcrypt20-dev libgpg-error-dev
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;35.0.0" || true
+          echo "NDK=${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}" >> "$GITHUB_ENV"
+
+      - name: Build libgpg-error, libgcrypt and libaacs for each ABI
+        run: |
+          set -eux
+          TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          export PATH=$TOOLCHAIN/bin:$PATH
+          export AR=llvm-ar RANLIB=llvm-ranlib NM=llvm-nm STRIP=llvm-strip
+          ROOT=$PWD
+          curl -fLO https://gnupg.org/ftp/gcrypt/libgpg-error/libgpg-error-$GPG_ERROR_VER.tar.bz2
+          curl -fLO https://gnupg.org/ftp/gcrypt/libgcrypt/libgcrypt-$GCRYPT_VER.tar.bz2
+          sh ./bootstrap
+
+          build_abi() {  # abi cc-prefix host
+            ABI=$1; CCP=$2; HOST=$3
+            export CC=${CCP}${API}-clang
+            PREFIX=$ROOT/sysroot-$ABI
+            mkdir -p "$PREFIX" "w-$ABI" && cd "w-$ABI"
+            tar xjf ../libgpg-error-$GPG_ERROR_VER.tar.bz2
+            ( cd libgpg-error-$GPG_ERROR_VER &&
+              ./configure --host=$HOST --prefix=$PREFIX --disable-doc --disable-tests \
+                          --enable-static --disable-shared CFLAGS="-O2 -fPIC" &&
+              make -j"$(nproc)" && make install )
+            tar xjf ../libgcrypt-$GCRYPT_VER.tar.bz2
+            ( cd libgcrypt-$GCRYPT_VER &&
+              ./configure --host=$HOST --prefix=$PREFIX --disable-doc --disable-asm \
+                          --enable-static --disable-shared \
+                          --with-libgpg-error-prefix=$PREFIX CFLAGS="-O2 -fPIC" &&
+              make -j"$(nproc)" && make install )
+            cd "$ROOT"
+            mkdir -p build-$ABI && cd build-$ABI
+            export PKG_CONFIG_LIBDIR=$PREFIX/lib/pkgconfig PKG_CONFIG_PATH= PKG_CONFIG_SYSROOT_DIR=
+            export PKG_CONFIG="pkg-config --static"
+            ../configure --host=$HOST --prefix=/ --disable-static --enable-shared \
+                         --with-libgcrypt-prefix=$PREFIX CFLAGS="-O2 -fPIC" \
+                         LDFLAGS="-L$PREFIX/lib -Wl,--exclude-libs,ALL"
+            make -j"$(nproc)"
+            cd "$ROOT"
+          }
+          build_abi arm64-v8a   aarch64-linux-android     aarch64-linux-android
+          build_abi armeabi-v7a armv7a-linux-androideabi  arm-linux-androideabi
+          build_abi x86_64      x86_64-linux-android      x86_64-linux-android
+
+      - name: Package the APK
+        run: |
+          set -eux
+          mkdir -p ~/.android
+          [ -f ~/.android/debug.keystore ] || keytool -genkeypair -keystore ~/.android/debug.keystore \
+            -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 \
+            -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          export PATH=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
+          export LIBAACS=$PWD ANDROID_SDK=$ANDROID_HOME BUILD_TOOLS=35.0.0
+          export READELF=llvm-readelf
+          sh package/android/build-apk-android.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libaacs-provider-apk
+          path: libaacs-src/package/android/out/libaacs-provider.apk
